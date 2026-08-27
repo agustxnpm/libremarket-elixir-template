@@ -15,6 +15,7 @@ defmodule Libremarket.Supervisor do
       {Libremarket.Infracciones.Server, %{}},
       {Libremarket.Pagos.Server, %{}},
       {Libremarket.Envios.Server, %{}},
+      {Libremarket.Ventas.Server, %{}},
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
