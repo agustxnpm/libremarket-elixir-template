@@ -19,6 +19,18 @@ La reserva y la autorizacion del pago no forman una transaccion distribuida. Si 
 
 El uso de `Task.async/1` permite observar solicitudes concurrentes, pero no elimina la coordinacion: cada llamada a un `GenServer` sigue siendo sincronica para la tarea que la realiza.
 
+## Estructuras de datos por servidor
+
+Cada `GenServer` mantiene su propio estado, aislado del resto de los procesos:
+
+- `Ventas.Server`: un mapa `%{id_producto => cantidad}` con el stock disponible, inicializado aleatoriamente por `Ventas.stock_inicial/0`. Se actualiza en cada reserva o liberacion.
+- `Pagos.Server`: un mapa `%{id_compra => resultado}` donde `resultado` es un booleano que indica si el pago fue autorizado. Se agrega una entrada por cada compra procesada.
+- `Envios.Server`: un mapa `%{id_compra => resultado}` con el costo calculado o el estado de agendamiento del envio.
+- `Infracciones.Server`: un mapa `%{id_compra => resultado}` con el booleano que indica si se detecto una infraccion.
+- `Compras.Server`: no acumula estado propio; su unico rol es delegar cada `handle_call` en las funciones del modulo `Compras`, que a su vez coordina al resto de los servidores.
+
+Al ser mapas propios de cada proceso, no hay memoria compartida entre servidores: toda lectura o escritura pasa por un mensaje (`GenServer.call/2`), lo que evita condiciones de carrera sobre estos datos.
+
 ## Resultados observables
 
 - En una venta exitosa, el stock queda reducido en una unidad y se envia o agenda el producto segun la entrega.
