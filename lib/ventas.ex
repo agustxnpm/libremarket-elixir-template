@@ -53,6 +53,10 @@ defmodule Libremarket.Ventas.Server do
     GenServer.call(pid, {:liberar_producto, id_producto})
   end
 
+  def enviar_producto(pid \\ __MODULE__, id_producto) do
+    GenServer.call(pid, {:enviar_producto, id_producto})
+  end
+
   def listar_stock(pid \\ __MODULE__) do
     GenServer.call(pid, :listar_stock)
   end
@@ -81,6 +85,11 @@ defmodule Libremarket.Ventas.Server do
   def handle_call({:liberar_producto, id_producto}, _from, stock) do
     nuevo_stock = Libremarket.Ventas.liberar_producto(stock, id_producto)
     {:reply, :ok, nuevo_stock}
+  end
+
+  @impl true
+  def handle_call({:enviar_producto, _id_producto}, _from, stock) do
+    {:reply, :enviado, stock}
   end
 
   @impl true
