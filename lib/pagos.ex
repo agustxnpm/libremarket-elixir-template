@@ -30,6 +30,13 @@ defmodule Libremarket.Pagos.Server do
     GenServer.call(pid, :listar_pagos)
   end
 
+  @doc """
+  Punto de entrada de los pedidos que llegan por AMQP (ver
+  `Libremarket.Amqp.RpcServer`).
+  """
+  def handle_rpc(:autorizar_pago, [id_compra]), do: autorizar_pago(id_compra)
+  def handle_rpc(:listar_pagos, []), do: listar_pagos()
+
   # Callbacks
 
   @doc """

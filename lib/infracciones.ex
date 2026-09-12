@@ -30,6 +30,13 @@ defmodule Libremarket.Infracciones.Server do
     GenServer.call(pid, :listar_infracciones)
   end
 
+  @doc """
+  Punto de entrada de los pedidos que llegan por AMQP (ver
+  `Libremarket.Amqp.RpcServer`).
+  """
+  def handle_rpc(:detectar_infraccion, [id_compra]), do: detectar_infraccion(id_compra)
+  def handle_rpc(:listar_infracciones, []), do: listar_infracciones()
+
   # Callbacks
 
   @doc """

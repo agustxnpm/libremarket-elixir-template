@@ -61,6 +61,16 @@ defmodule Libremarket.Ventas.Server do
     GenServer.call(pid, :listar_stock)
   end
 
+  @doc """
+  Punto de entrada de los pedidos que llegan por AMQP (ver
+  `Libremarket.Amqp.RpcServer`). Traduce la operacion pedida en una llamada
+  local sobre este mismo GenServer.
+  """
+  def handle_rpc(:reservar_producto, [id_producto]), do: reservar_producto(id_producto)
+  def handle_rpc(:liberar_producto, [id_producto]), do: liberar_producto(id_producto)
+  def handle_rpc(:enviar_producto, [id_producto]), do: enviar_producto(id_producto)
+  def handle_rpc(:listar_stock, []), do: listar_stock()
+
   # Callbacks
   @doc """
   Inicializa el estado del servidor con stock aleatorio

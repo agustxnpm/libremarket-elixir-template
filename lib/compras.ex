@@ -1,29 +1,42 @@
 defmodule Libremarket.Compras do
+  @moduledoc """
+  Orquesta el flujo de una compra hablando con los demas servicios por AMQP
+  (a traves de `Libremarket.Amqp.RpcClient`), en lugar de llamarlos
+  directamente como GenServers locales. Esto es lo que permite que cada
+  servicio corra en su propio contenedor: ya no hace falta que esten en el
+  mismo nodo BEAM, alcanza con que todos puedan llegar al broker (LavinMQ/
+  CloudAMQP).
+
+  El reloj vectorial de cada mensaje lo maneja el `RpcClient` de forma
+  transparente; este modulo no necesita saber que existe.
+  """
+
+  alias Libremarket.Amqp.RpcClient
 
   def comprar(id_producto, _medio_de_pago, forma_de_entrega) do
     id_compra = :erlang.unique_integer([:positive])
 
-    case Libremarket.Ventas.Server.reservar_producto(id_producto) do
+    case RpcClient.call(:ventas, :reservar_producto, [id_producto]) do
       :sin_stock ->
         {:error, :sin_stock}
 
       :ok ->
-        case Libremarket.Infracciones.Server.detectar_infraccion(id_compra) do
-          :true ->
-            Libremarket.Ventas.Server.liberar_producto(id_producto)
+        case RpcClient.call(:infracciones, :detectar_infraccion, [id_compra]) do
+          true ->
+            RpcClient.call(:ventas, :liberar_producto, [id_producto])
             {:error, :infraccion}
 
-          :false ->
+          false ->
             if forma_de_entrega == :correo do
-              Libremarket.Envios.Server.calcular_costo(id_compra)
+              RpcClient.call(:envios, :calcular_costo, [id_compra])
             end
 
-            case Libremarket.Pagos.Server.autorizar_pago(id_compra) do
+            case RpcClient.call(:pagos, :autorizar_pago, [id_compra]) do
               true ->
                 finalizar_compra(id_compra, id_producto, forma_de_entrega)
 
               false ->
-                Libremarket.Ventas.Server.liberar_producto(id_producto)
+                RpcClient.call(:ventas, :liberar_producto, [id_producto])
                 {:error, :pago_rechazado}
             end
         end
@@ -31,20 +44,19 @@ defmodule Libremarket.Compras do
   end
 
   def finalizar_compra(id_compra, id_producto, :correo) do
-    :agendado = Libremarket.Envios.Server.agendar_envio(id_compra)
-    :enviado = Libremarket.Ventas.Server.enviar_producto(id_producto)
+    :agendado = RpcClient.call(:envios, :agendar_envio, [id_compra])
+    :enviado = RpcClient.call(:ventas, :enviar_producto, [id_producto])
     {:ok, id_compra, :producto_enviado}
   end
 
   def finalizar_compra(id_compra, id_producto, :retira) do
-    :enviado = Libremarket.Ventas.Server.enviar_producto(id_producto)
+    :enviado = RpcClient.call(:ventas, :enviar_producto, [id_producto])
     {:ok, id_compra, :producto_enviado}
   end
 
   def finalizar_compra(id_compra, id_producto, _forma_de_entrega) do
     finalizar_compra(id_compra, id_producto, :retira)
   end
-
 end
 
 defmodule Libremarket.Compras.Server do

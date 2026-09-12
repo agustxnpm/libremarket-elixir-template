@@ -38,6 +38,14 @@ defmodule Libremarket.Envios.Server do
     GenServer.call(pid, :listar_envios)
   end
 
+  @doc """
+  Punto de entrada de los pedidos que llegan por AMQP (ver
+  `Libremarket.Amqp.RpcServer`).
+  """
+  def handle_rpc(:calcular_costo, [id_compra]), do: calcular_costo(id_compra)
+  def handle_rpc(:agendar_envio, [id_compra]), do: agendar_envio(id_compra)
+  def handle_rpc(:listar_envios, []), do: listar_envios()
+
   # Callbacks
 
   @doc """
