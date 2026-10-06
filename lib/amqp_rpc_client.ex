@@ -35,6 +35,9 @@ defmodule Libremarket.Amqp.RpcClient do
     GenServer.call(__MODULE__, {:rpc, servicio, operacion, args}, @timeout)
   end
 
+  @doc "Devuelve el reloj vectorial actual del cliente (compras)."
+  def clock(), do: GenServer.call(__MODULE__, :clock)
+
   # Callbacks
 
   @impl true
@@ -57,6 +60,9 @@ defmodule Libremarket.Amqp.RpcClient do
   end
 
   @impl true
+  def handle_call(:clock, _from, estado), do: {:reply, estado.clock, estado}
+
+  @impl true
   def handle_call({:rpc, servicio, operacion, args}, from, estado) do
     correlation_id = "#{:erlang.unique_integer([:positive, :monotonic])}"
 
@@ -64,6 +70,8 @@ defmodule Libremarket.Amqp.RpcClient do
     clock = VectorClock.increment(estado.clock, @yo)
 
     mensaje = :erlang.term_to_binary(%{op: operacion, args: args, clock: clock})
+
+    IO.puts("[compras] ENVIA   #{servicio}.#{operacion} #{inspect(args)} #{VectorClock.format(clock)}")
 
     Basic.publish(
       estado.channel,
@@ -98,6 +106,8 @@ defmodule Libremarket.Amqp.RpcClient do
           estado.clock
           |> VectorClock.merge(reloj_remoto)
           |> VectorClock.increment(@yo)
+
+        IO.puts("[compras] RECIBE  respuesta #{inspect(resultado)} reloj remoto=#{VectorClock.format(reloj_remoto)} => #{VectorClock.format(clock)}")
 
         GenServer.reply(from, resultado)
         {:noreply, %{estado | clock: clock, pendientes: pendientes}}

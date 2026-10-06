@@ -37,4 +37,10 @@ defmodule Libremarket.VectorClock do
   def merge(clock_a, clock_b) do
     Map.merge(clock_a, clock_b, fn _servicio, a, b -> max(a, b) end)
   end
+
+  @doc "Texto compacto del reloj en orden fijo, ej: `[compras=3 ventas=2 pagos=0 envios=0 infracciones=1]`."
+  def format(clock) do
+    contenido = Enum.map_join(@servicios, " ", fn s -> "#{s}=#{Map.get(clock, s, 0)}" end)
+    "[#{contenido}]"
+  end
 end

@@ -66,13 +66,15 @@ defmodule Libremarket.Amqp.RpcServer do
       |> VectorClock.merge(reloj_remoto)
       |> VectorClock.increment(estado.servicio)
 
-    IO.puts("[#{estado.servicio}] pedido: #{operacion} #{inspect(args)}")
+    IO.puts("[#{estado.servicio}] RECIBE  #{operacion} #{inspect(args)} reloj remoto=#{VectorClock.format(reloj_remoto)} => #{VectorClock.format(clock_recibido)}")
     resultado = estado.handler.(operacion, args)
 
     # Evento de "envio" de la respuesta: se vuelve a avanzar antes de publicar.
     clock_respuesta = VectorClock.increment(clock_recibido, estado.servicio)
 
     respuesta = :erlang.term_to_binary(%{result: resultado, clock: clock_respuesta})
+
+    IO.puts("[#{estado.servicio}] RESPONDE #{inspect(resultado)} #{VectorClock.format(clock_respuesta)}")
 
     Basic.publish(estado.channel, "", meta.reply_to, respuesta, correlation_id: meta.correlation_id)
     Basic.ack(estado.channel, meta.delivery_tag)
