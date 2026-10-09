@@ -3,12 +3,18 @@ defmodule Libremarket.Amqp.RpcClient do
   Cliente RPC sobre AMQP.
 
   Publica un pedido en la cola de un servicio remoto (`:ventas`, `:pagos`,
-  `:envios` o `:infracciones`) y espera la respuesta en una cola exclusiva
+  `:envios` o `:infracciones`) y recibe la respuesta en una cola exclusiva
   propia, emparejando pedido/respuesta por `correlation_id`.
 
+  Es 100% asincronico: `request/5` no espera nada. Por cada pedido se guarda un
+  `contexto` opaco (el cliente no lo interpreta) y, cuando llega la respuesta,
+  se le entrega al proceso `responder_a` como
+  `{:rpc_reply, contexto, resultado}`. Si no llega en `@timeout` ms, se le
+  entrega `{:rpc_timeout, contexto}`.
+
   El reloj vectorial de este proceso (`:compras`) viaja adentro de cada
-  mensaje y se actualiza aca adentro de forma transparente: `Compras.comprar/3`
-  llama a `call/3` sin saber que existen relojes vectoriales.
+  mensaje y se actualiza aca adentro de forma transparente, sin que quien
+  hace el pedido sepa que existen relojes vectoriales.
   """
 
   use GenServer
@@ -17,6 +23,8 @@ defmodule Libremarket.Amqp.RpcClient do
   alias Libremarket.VectorClock
 
   @yo :compras
+  # Tiempo maximo de espera de una respuesta (ms); se puede cambiar con
+  # `config :libremarket, rpc_timeout: ms`.
   @timeout 15_000
 
   # API del cliente
@@ -26,13 +34,15 @@ defmodule Libremarket.Amqp.RpcClient do
   end
 
   @doc """
-  Invoca `operacion` con `args` (una lista) en el servicio remoto `servicio`
-  y espera el resultado. Ejemplo:
+  Pide `operacion` con `args` (una lista) al servicio remoto `servicio` y
+  retorna enseguida. Mas tarde, `responder_a` recibe por `cast`
+  `{:rpc_reply, contexto, resultado}` o, si el servicio no contesta a tiempo,
+  `{:rpc_timeout, contexto}`. Ejemplo:
 
-      Libremarket.Amqp.RpcClient.call(:ventas, :reservar_producto, [3])
+      Libremarket.Amqp.RpcClient.request(:ventas, :reservar_producto, [3], {id_compra, :reservando})
   """
-  def call(servicio, operacion, args \\ []) do
-    GenServer.call(__MODULE__, {:rpc, servicio, operacion, args}, @timeout)
+  def request(servicio, operacion, args, contexto, responder_a \\ Libremarket.Compras.Server) do
+    GenServer.cast(__MODULE__, {:rpc, servicio, operacion, args, contexto, responder_a})
   end
 
   @doc "Devuelve el reloj vectorial actual del cliente (compras)."
@@ -63,7 +73,7 @@ defmodule Libremarket.Amqp.RpcClient do
   def handle_call(:clock, _from, estado), do: {:reply, estado.clock, estado}
 
   @impl true
-  def handle_call({:rpc, servicio, operacion, args}, from, estado) do
+  def handle_cast({:rpc, servicio, operacion, args, contexto, responder_a}, estado) do
     correlation_id = "#{:erlang.unique_integer([:positive, :monotonic])}"
 
     # Evento de "envio": el reloj propio avanza antes de publicar el mensaje.
@@ -71,7 +81,7 @@ defmodule Libremarket.Amqp.RpcClient do
 
     mensaje = :erlang.term_to_binary(%{op: operacion, args: args, clock: clock})
 
-    IO.puts("[compras] ENVIA   #{servicio}.#{operacion} #{inspect(args)} #{VectorClock.format(clock)}")
+    IO.puts("[compras #{etiqueta(contexto, correlation_id)}] ENVIA   #{servicio}.#{operacion} #{inspect(args, charlists: :as_lists)} #{VectorClock.format(clock)}")
 
     Basic.publish(
       estado.channel,
@@ -82,10 +92,19 @@ defmodule Libremarket.Amqp.RpcClient do
       correlation_id: correlation_id
     )
 
-    # No respondemos todavia: la respuesta real llega de forma asincronica
-    # como {:basic_deliver, ...} y ahi recien hacemos GenServer.reply/2.
-    pendientes = Map.put(estado.pendientes, correlation_id, from)
-    {:noreply, %{estado | clock: clock, pendientes: pendientes}}
+    # No se espera la respuesta: llega como {:basic_deliver, ...} y, si no
+    # llega, como {:rpc_timeout, ...}. En ambos casos se avisa a `responder_a`.
+    timer = Process.send_after(self(), {:rpc_timeout, correlation_id}, timeout())
+
+    pendiente = %{
+      contexto: contexto,
+      responder_a: responder_a,
+      timer: timer,
+      servicio: servicio,
+      operacion: operacion
+    }
+
+    {:noreply, %{estado | clock: clock, pendientes: Map.put(estado.pendientes, correlation_id, pendiente)}}
   end
 
   @impl true
@@ -98,19 +117,45 @@ defmodule Libremarket.Amqp.RpcClient do
     case Map.pop(estado.pendientes, meta.correlation_id) do
       {nil, _pendientes} ->
         # Respuesta que llego tarde (ya vencio el timeout) o que no es nuestra: se descarta.
+        IO.puts("[compras cid=#{meta.correlation_id}] DESCARTA respuesta tardia o ajena #{inspect(resultado)}")
         {:noreply, estado}
 
-      {from, pendientes} ->
+      {pendiente, pendientes} ->
+        Process.cancel_timer(pendiente.timer)
+
         # Evento de "recepcion": se funde el reloj recibido con el propio y se avanza.
         clock =
           estado.clock
           |> VectorClock.merge(reloj_remoto)
           |> VectorClock.increment(@yo)
 
-        IO.puts("[compras] RECIBE  respuesta #{inspect(resultado)} reloj remoto=#{VectorClock.format(reloj_remoto)} => #{VectorClock.format(clock)}")
+        IO.puts("[compras #{etiqueta(pendiente.contexto, meta.correlation_id)}] RECIBE  respuesta #{inspect(resultado)} reloj remoto=#{VectorClock.format(reloj_remoto)} => #{VectorClock.format(clock)}")
 
-        GenServer.reply(from, resultado)
+        GenServer.cast(pendiente.responder_a, {:rpc_reply, pendiente.contexto, resultado})
         {:noreply, %{estado | clock: clock, pendientes: pendientes}}
     end
   end
+
+  @impl true
+  def handle_info({:rpc_timeout, correlation_id}, estado) do
+    case Map.pop(estado.pendientes, correlation_id) do
+      # La respuesta ya llego (el timeout quedo en la cola de mensajes): no hay nada que hacer.
+      {nil, _pendientes} ->
+        {:noreply, estado}
+
+      {pendiente, pendientes} ->
+        # No hubo evento de recepcion: el reloj no se toca.
+        IO.puts("[compras #{etiqueta(pendiente.contexto, correlation_id)}] TIMEOUT #{pendiente.servicio}.#{pendiente.operacion} sin respuesta tras #{timeout()} ms")
+
+        GenServer.cast(pendiente.responder_a, {:rpc_timeout, pendiente.contexto})
+        {:noreply, %{estado | pendientes: pendientes}}
+    end
+  end
+
+  defp timeout(), do: Application.get_env(:libremarket, :rpc_timeout, @timeout)
+
+  # Etiqueta de los logs para poder separar compras intercaladas: el contexto
+  # que usa Compras es {id_compra, paso}; con cualquier otro se usa el correlation_id.
+  defp etiqueta({id_compra, _paso}, _correlation_id), do: "##{id_compra}"
+  defp etiqueta(_contexto, correlation_id), do: "cid=#{correlation_id}"
 end

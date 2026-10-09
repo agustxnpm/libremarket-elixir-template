@@ -7,8 +7,15 @@ defmodule Libremarket.MixProject do
       version: "0.1.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      aliases: aliases()
     ]
+  end
+
+  # Los tests no levantan la aplicacion (necesitaria el broker AMQP); los de
+  # integracion (`mix test --include integration`) la arrancan ellos mismos.
+  defp aliases do
+    [test: "test --no-start"]
   end
 
   # Run "mix help compile.app" to learn about applications.
