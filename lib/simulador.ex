@@ -8,6 +8,7 @@ defmodule Simulador do
       case Libremarket.Ui.comprar(:rand.uniform(10), pago, envio) do
         {:ok, id_compra} -> Libremarket.Ui.esperar_resultado(id_compra)
         :cancelada -> :cancelada
+        {:error, _} = error -> error
       end
 
     # Con compras concurrentes el reloj incluye eventos de otras compras en vuelo.

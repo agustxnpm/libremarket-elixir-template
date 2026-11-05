@@ -40,7 +40,7 @@ defmodule Libremarket.Compras do
         }
   @type resultado_final ::
           {:ok, integer(), :producto_enviado}
-          | {:error, :sin_stock | :infraccion | :pago_rechazado | :timeout}
+          | {:error, :sin_stock | :infraccion | :pago_rechazado | :timeout | :persistencia}
           | {:error, {:respuesta_inesperada, paso(), term()}}
 
   @doc """
@@ -67,6 +67,16 @@ defmodule Libremarket.Compras do
   """
   @spec avanzar(estado(), term()) ::
           {:continuar, estado(), [accion()]} | {:finalizar, resultado_final(), [accion()]}
+  # Debe ir primero: algunos pasos (p. ej. :calculando_costo) aceptan cualquier respuesta.
+  # Un servicio fallo al persistir: resultado final. Se compensa solo si ya hay
+  # algo reservado (en :reservando no se sabe, y en :enviando_producto el envio
+  # pudo haberse hecho; mismo criterio que timeout/1).
+  def avanzar(%{paso: paso}, {:error, :persistencia}) when paso in [:reservando, :enviando_producto],
+    do: {:finalizar, {:error, :persistencia}, []}
+
+  def avanzar(estado, {:error, :persistencia}),
+    do: {:finalizar, {:error, :persistencia}, [liberar(estado)]}
+
   def avanzar(%{paso: :reservando} = estado, :ok),
     do:
       continuar(estado, :infracciones, :detectar_infraccion, [estado.id], :verificando_infraccion)
@@ -118,6 +128,14 @@ defmodule Libremarket.Compras do
 
   def timeout(estado), do: {:finalizar, {:error, :timeout}, [liberar(estado)]}
 
+  @doc """
+  Texto corto del resultado final, tal como se guarda en `compras.resultado`.
+  """
+  @spec resultado_a_texto(resultado_final()) :: String.t()
+  def resultado_a_texto({:ok, _id, :producto_enviado}), do: "producto_enviado"
+  def resultado_a_texto({:error, {:respuesta_inesperada, _paso, _resp}}), do: "respuesta_inesperada"
+  def resultado_a_texto({:error, motivo}) when is_atom(motivo), do: Atom.to_string(motivo)
+
   defp enviar_producto(estado),
     do: continuar(estado, :ventas, :enviar_producto, [estado.producto], :enviando_producto)
 
@@ -125,6 +143,93 @@ defmodule Libremarket.Compras do
     do: {:continuar, %{estado | paso: paso}, [{:rpc, servicio, operacion, args, paso}]}
 
   defp liberar(estado), do: {:rpc, :ventas, :liberar_producto, [estado.producto], :liberando}
+end
+
+defmodule Libremarket.Compras.Memoria do
+  @moduledoc """
+  Adaptador en memoria (tests y `iex` sin base). `datos` es el proximo id.
+  El estado de las compras lo lleva el propio `Compras.Server`.
+  """
+
+  def init(_opts), do: 1
+
+  def crear(siguiente_id, _producto, _medio_pago, _entrega), do: {:ok, siguiente_id, siguiente_id + 1}
+  def registrar_paso(_datos, _id, _paso), do: :ok
+  def registrar_final(_datos, _id, _paso, _resultado), do: :ok
+  def interrumpir_en_curso(_datos), do: {:ok, []}
+  def obtener(_id), do: :no_encontrada
+end
+
+defmodule Libremarket.Compras.Postgres do
+  @moduledoc """
+  Adaptador PostgreSQL. El `id_compra` sale de la secuencia de la tabla
+  `compras`. El `pid` del solicitante nunca se persiste. Las fallas se
+  devuelven como `{:error, :persistencia}`; nunca lanzan.
+  """
+  alias Libremarket.Compras
+  alias Libremarket.Repo
+
+  def init(_opts), do: nil
+
+  def crear(datos, producto, medio_pago, entrega) do
+    sql =
+      "INSERT INTO compras (id_producto, medio_pago, entrega, paso, estado) " <>
+        "VALUES ($1, $2, $3, 'reservando', 'en_curso') RETURNING id_compra"
+
+    case Repo.query(sql, [producto, to_string(medio_pago), to_string(entrega)]) do
+      {:ok, %{rows: [[id_compra]]}} -> {:ok, id_compra, datos}
+      {:error, :persistencia} = error -> error
+    end
+  end
+
+  def registrar_paso(_datos, id_compra, paso), do: actualizar(id_compra, paso, "en_curso", nil, nil)
+
+  def registrar_final(_datos, id_compra, paso, resultado) do
+    actualizar(id_compra, paso, "finalizada", Compras.resultado_a_texto(resultado), DateTime.utc_now())
+  end
+
+  defp actualizar(id_compra, paso, estado, resultado, finalizada_at) do
+    sql =
+      "UPDATE compras SET paso = $2, estado = $3, resultado = $4, finalizada_at = $5 WHERE id_compra = $1"
+
+    case Repo.query(sql, [id_compra, to_string(paso), estado, resultado, finalizada_at]) do
+      {:ok, _} -> :ok
+      {:error, :persistencia} = error -> error
+    end
+  end
+
+  @doc """
+  Marca como `interrumpida` toda compra que quedo `en_curso` (el proceso que
+  la llevaba murio) y devuelve `{:ok, [%{id:, producto:, paso:}]}`.
+  """
+  def interrumpir_en_curso(_datos) do
+    sql =
+      "UPDATE compras SET estado = 'interrumpida', finalizada_at = NOW() " <>
+        "WHERE estado = 'en_curso' RETURNING id_compra, id_producto, paso"
+
+    case Repo.query(sql) do
+      {:ok, %{rows: filas}} ->
+        {:ok, for([id, producto, paso] <- filas, do: %{id: id, producto: producto, paso: paso})}
+
+      {:error, :persistencia} = error ->
+        error
+    end
+  end
+
+  def obtener(id_compra) do
+    sql = "SELECT id_compra, estado, paso, resultado FROM compras WHERE id_compra = $1"
+
+    case Repo.query(sql, [id_compra]) do
+      {:ok, %{rows: [[id, estado, paso, resultado]]}} ->
+        {:ok, %{id_compra: id, estado: estado, paso: paso, resultado: resultado}}
+
+      {:ok, %{rows: []}} ->
+        :no_encontrada
+
+      {:error, :persistencia} = error ->
+        error
+    end
+  end
 end
 
 defmodule Libremarket.Compras.Server do
@@ -156,7 +261,8 @@ defmodule Libremarket.Compras.Server do
   end
 
   @doc """
-  Inicia una compra y devuelve `{:ok, id_compra}` sin esperar el resultado.
+  Inicia una compra y devuelve `{:ok, id_compra}` sin esperar el resultado
+  (o `{:error, :persistencia}` si no se pudo registrar la compra).
   El resultado llega al proceso que llamo como `{:compra_finalizada, id_compra, resultado}`.
   """
   def comprar(
@@ -173,10 +279,41 @@ defmodule Libremarket.Compras.Server do
 
   @doc """
   Consulta el estado de una compra: `{:en_curso, paso}`, `{:finalizada, resultado}`
-  o `:desconocida`.
+  o `:desconocida`. Con Postgres, lo que no esta en memoria (por ejemplo tras un
+  reinicio) se lee de la base: `{:interrumpida, paso}` o `{:finalizada, resultado_en_texto}`.
   """
   def estado_compra(pid \\ __MODULE__, id_compra) do
     GenServer.call(pid, {:estado_compra, id_compra})
+  end
+
+  @doc """
+  Consulta para la API HTTP: `{:ok, %{id_compra:, estado:, paso:, resultado:}}`,
+  `:no_encontrada` o `{:error, :persistencia}`. Con Postgres lee directo del
+  primario (sin pasar por el GenServer); en memoria traduce `estado_compra/1`.
+  """
+  def consultar(id_compra) do
+    if Libremarket.Storage.postgres?() do
+      Libremarket.Compras.Postgres.obtener(id_compra)
+    else
+      case estado_compra(id_compra) do
+        {:en_curso, paso} ->
+          {:ok, %{id_compra: id_compra, estado: "en_curso", paso: to_string(paso), resultado: nil}}
+
+        {:finalizada, resultado} ->
+          {:ok,
+           %{
+             id_compra: id_compra,
+             estado: "finalizada",
+             paso: nil,
+             resultado: Compras.resultado_a_texto(resultado)
+           }}
+
+        :desconocida ->
+          :no_encontrada
+      end
+    end
+  catch
+    :exit, _ -> {:error, :persistencia}
   end
 
   # Callbacks
@@ -185,8 +322,33 @@ defmodule Libremarket.Compras.Server do
   Inicializa el estado del servidor
   """
   @impl true
-  def init(_opts) do
-    {:ok, %{en_curso: %{}, finalizadas: %{}}}
+  def init(opts) do
+    adapter = Libremarket.Storage.adapter(Libremarket.Compras.Memoria, Libremarket.Compras.Postgres)
+
+    estado = %{en_curso: %{}, finalizadas: %{}, adapter: adapter, datos: adapter.init(opts)}
+    {:ok, estado, {:continue, :recuperar}}
+  end
+
+  # Las compras que quedaron `en_curso` pertenecen a un proceso que murio (el pid
+  # del solicitante no se persiste): se marcan `interrumpida` y, si ya habian
+  # superado la reserva, se libera el stock.
+  @impl true
+  def handle_continue(:recuperar, estado) do
+    case estado.adapter.interrumpir_en_curso(estado.datos) do
+      {:ok, interrumpidas} ->
+        for %{id: id, producto: producto, paso: paso} <- interrumpidas do
+          IO.puts("[compras ##{id}] INTERRUMPIDA al reiniciar (paso=#{paso})")
+
+          if paso != "reservando" do
+            RpcClient.request(:ventas, :liberar_producto, [producto], {id, :liberando})
+          end
+        end
+
+      {:error, :persistencia} ->
+        IO.puts("[compras] no se pudieron recuperar las compras en curso")
+    end
+
+    {:noreply, estado}
   end
 
   @doc """
@@ -198,14 +360,19 @@ defmodule Libremarket.Compras.Server do
         {solicitante, _tag},
         estado
       ) do
-    id_compra = :erlang.unique_integer([:positive])
+    case estado.adapter.crear(estado.datos, id_producto, medio_de_pago, forma_de_entrega) do
+      {:ok, id_compra, datos} ->
+        {compra, acciones} =
+          Compras.iniciar(id_compra, id_producto, medio_de_pago, forma_de_entrega, solicitante)
 
-    {compra, acciones} =
-      Compras.iniciar(id_compra, id_producto, medio_de_pago, forma_de_entrega, solicitante)
+        ejecutar_acciones(id_compra, acciones)
 
-    ejecutar_acciones(id_compra, acciones)
+        estado = put_in(%{estado | datos: datos}, [:en_curso, id_compra], compra)
+        {:reply, {:ok, id_compra}, estado}
 
-    {:reply, {:ok, id_compra}, put_in(estado, [:en_curso, id_compra], compra)}
+      {:error, :persistencia} ->
+        {:reply, {:error, :persistencia}, estado}
+    end
   end
 
   @impl true
@@ -214,10 +381,19 @@ defmodule Libremarket.Compras.Server do
       case estado do
         %{en_curso: %{^id_compra => %{paso: paso}}} -> {:en_curso, paso}
         %{finalizadas: %{^id_compra => resultado}} -> {:finalizada, resultado}
-        _ -> :desconocida
+        _ -> desde_la_base(estado.adapter, id_compra)
       end
 
     {:reply, respuesta, estado}
+  end
+
+  defp desde_la_base(adapter, id_compra) do
+    case adapter.obtener(id_compra) do
+      {:ok, %{estado: "en_curso", paso: paso}} -> {:en_curso, paso}
+      {:ok, %{estado: "interrumpida", paso: paso}} -> {:interrumpida, paso}
+      {:ok, %{estado: "finalizada", resultado: resultado}} -> {:finalizada, resultado}
+      _ -> :desconocida
+    end
   end
 
   # Respuesta a una compensacion: solo se registra, no avanza ninguna compra.
@@ -247,10 +423,12 @@ defmodule Libremarket.Compras.Server do
       %{^id_compra => %{paso: ^paso} = compra} ->
         case transicion.(compra) do
           {:continuar, compra, acciones} ->
+            estado.adapter.registrar_paso(estado.datos, id_compra, compra.paso)
             ejecutar_acciones(id_compra, acciones)
             {:noreply, put_in(estado, [:en_curso, id_compra], compra)}
 
           {:finalizar, resultado, acciones} ->
+            estado.adapter.registrar_final(estado.datos, id_compra, compra.paso, resultado)
             ejecutar_acciones(id_compra, acciones)
             {:noreply, finalizar(estado, compra, resultado)}
         end

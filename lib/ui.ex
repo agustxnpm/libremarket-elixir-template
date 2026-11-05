@@ -62,6 +62,10 @@ defmodule Libremarket.Ui do
     {:mensaje, "La compra no pudo completarse: un servicio no respondio a tiempo"}
   end
 
+  def informar_resultado({:error, :persistencia}) do
+    {:mensaje, "La compra no pudo completarse: error de persistencia"}
+  end
+
   def informar_resultado({:error, {:respuesta_inesperada, paso, _respuesta}}) do
     {:mensaje, "La compra fallo: respuesta inesperada de un servicio en el paso #{paso}"}
   end

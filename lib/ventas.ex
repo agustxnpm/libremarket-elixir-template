@@ -31,6 +31,76 @@ defmodule Libremarket.Ventas do
   end
 end
 
+defmodule Libremarket.Ventas.Memoria do
+  @moduledoc """
+  Adaptador en memoria (tests y `iex` sin base). Cada funcion recibe los datos
+  del adaptador y devuelve `{respuesta, datos}`.
+  """
+  alias Libremarket.Ventas
+
+  def init(_opts), do: Ventas.stock_inicial()
+  def reservar_producto(stock, id_producto), do: Ventas.reservar_producto(stock, id_producto)
+  def liberar_producto(stock, id_producto), do: {:ok, Ventas.liberar_producto(stock, id_producto)}
+  def listar_stock(stock), do: {stock, stock}
+end
+
+defmodule Libremarket.Ventas.Postgres do
+  @moduledoc """
+  Adaptador PostgreSQL: el stock vive en la tabla `productos` y las operaciones
+  son atomicas en SQL. Nunca lanza: las fallas se devuelven como `{:error, :persistencia}`.
+  """
+  require Logger
+
+  alias Libremarket.Repo
+  alias Libremarket.Ventas
+
+  # Semilla solo si la tabla esta vacia, asi el stock sobrevive a reinicios.
+  def init(_opts) do
+    case Repo.query("SELECT COUNT(*) FROM productos") do
+      {:ok, %{rows: [[0]]}} ->
+        for {id, stock} <- Ventas.stock_inicial() do
+          Repo.query(
+            "INSERT INTO productos (id_producto, stock) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            [id, stock]
+          )
+        end
+
+      {:ok, _} ->
+        :ok
+
+      {:error, :persistencia} ->
+        Logger.error("Ventas: no se pudo verificar la semilla de productos")
+    end
+
+    nil
+  end
+
+  def reservar_producto(datos, id_producto) do
+    sql =
+      "UPDATE productos SET stock = stock - 1 WHERE id_producto = $1 AND stock > 0 RETURNING stock"
+
+    case Repo.query(sql, [id_producto]) do
+      {:ok, %{num_rows: 1}} -> {:ok, datos}
+      {:ok, %{num_rows: 0}} -> {:sin_stock, datos}
+      {:error, :persistencia} -> {{:error, :persistencia}, datos}
+    end
+  end
+
+  def liberar_producto(datos, id_producto) do
+    case Repo.query("UPDATE productos SET stock = stock + 1 WHERE id_producto = $1", [id_producto]) do
+      {:ok, _} -> {:ok, datos}
+      {:error, :persistencia} -> {{:error, :persistencia}, datos}
+    end
+  end
+
+  def listar_stock(datos) do
+    case Repo.query("SELECT id_producto, stock FROM productos ORDER BY id_producto") do
+      {:ok, %{rows: filas}} -> {Map.new(filas, fn [id, stock] -> {id, stock} end), datos}
+      {:error, :persistencia} -> {{:error, :persistencia}, datos}
+    end
+  end
+end
+
 defmodule Libremarket.Ventas.Server do
   @moduledoc """
   Ventas
@@ -73,37 +143,35 @@ defmodule Libremarket.Ventas.Server do
 
   # Callbacks
   @doc """
-  Inicializa el estado del servidor con stock aleatorio
+  Inicializa el servidor con el adaptador de persistencia configurado
+  (ver `Libremarket.Storage`).
   """
   @impl true
-  def init(_opts) do
-    {:ok, Libremarket.Ventas.stock_inicial()}
-  end
-
-  @doc """
-  Callback para un call :reservar_producto
-  """
-  @impl true
-  def handle_call({:reservar_producto, id_producto}, _from, stock) do
-    case Libremarket.Ventas.reservar_producto(stock, id_producto) do
-      {:ok, nuevo_stock} -> {:reply, :ok, nuevo_stock}
-      {:sin_stock, stock} -> {:reply, :sin_stock, stock}
-    end
+  def init(opts) do
+    adapter = Libremarket.Storage.adapter(Libremarket.Ventas.Memoria, Libremarket.Ventas.Postgres)
+    {:ok, %{adapter: adapter, datos: adapter.init(opts)}}
   end
 
   @impl true
-  def handle_call({:liberar_producto, id_producto}, _from, stock) do
-    nuevo_stock = Libremarket.Ventas.liberar_producto(stock, id_producto)
-    {:reply, :ok, nuevo_stock}
+  def handle_call({:reservar_producto, id_producto}, _from, estado) do
+    {respuesta, datos} = estado.adapter.reservar_producto(estado.datos, id_producto)
+    {:reply, respuesta, %{estado | datos: datos}}
   end
 
   @impl true
-  def handle_call({:enviar_producto, _id_producto}, _from, stock) do
-    {:reply, :enviado, stock}
+  def handle_call({:liberar_producto, id_producto}, _from, estado) do
+    {respuesta, datos} = estado.adapter.liberar_producto(estado.datos, id_producto)
+    {:reply, respuesta, %{estado | datos: datos}}
   end
 
   @impl true
-  def handle_call(:listar_stock, _from, stock) do
-    {:reply, stock, stock}
+  def handle_call({:enviar_producto, _id_producto}, _from, estado) do
+    {:reply, :enviado, estado}
+  end
+
+  @impl true
+  def handle_call(:listar_stock, _from, estado) do
+    {respuesta, datos} = estado.adapter.listar_stock(estado.datos)
+    {:reply, respuesta, %{estado | datos: datos}}
   end
 end

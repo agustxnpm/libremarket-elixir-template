@@ -149,6 +149,50 @@ defmodule Libremarket.ComprasTest do
     end
   end
 
+  describe "avanzar/2 - falla de persistencia en un servicio" do
+    test "en :reservando y :enviando_producto finaliza sin compensar" do
+      for paso <- [:reservando, :enviando_producto] do
+        assert {:finalizar, {:error, :persistencia}, []} =
+                 Compras.avanzar(en_paso(paso), {:error, :persistencia})
+      end
+    end
+
+    for paso <- [:verificando_infraccion, :calculando_costo, :autorizando_pago, :agendando_envio] do
+      test "en #{paso} finaliza con {:error, :persistencia} y libera el producto" do
+        assert {:finalizar, {:error, :persistencia}, [@liberar]} =
+                 Compras.avanzar(en_paso(unquote(paso)), {:error, :persistencia})
+      end
+    end
+  end
+
+  describe "resultado_a_texto/1" do
+    test "cabe en compras.resultado (VARCHAR(50))" do
+      resultados = [
+        {:ok, 1, :producto_enviado},
+        {:error, :sin_stock},
+        {:error, :infraccion},
+        {:error, :pago_rechazado},
+        {:error, :timeout},
+        {:error, :persistencia},
+        {:error, {:respuesta_inesperada, :reservando, :raro}}
+      ]
+
+      textos = Enum.map(resultados, &Compras.resultado_a_texto/1)
+
+      assert textos == [
+               "producto_enviado",
+               "sin_stock",
+               "infraccion",
+               "pago_rechazado",
+               "timeout",
+               "persistencia",
+               "respuesta_inesperada"
+             ]
+
+      assert Enum.all?(textos, &(String.length(&1) <= 50))
+    end
+  end
+
   describe "timeout/1" do
     test "en :reservando finaliza sin compensar (no se sabe si se reservo)" do
       assert {:finalizar, {:error, :timeout}, []} = Compras.timeout(en_paso(:reservando))
