@@ -11,7 +11,7 @@ defmodule Libremarket.Supervisor do
   - Si esta definida (un container por servicio, ver docker-compose.yml): se
     levanta solo lo que ESE container necesita.
       - Container de compras: el `Compras.Server` local + el `RpcClient`
-        (porque Compras es quien inicia pedidos hacia los demas).
+        (porque Compras es quien inicia pedidos hacia los demas) + la API HTTP.
       - Container de ventas/pagos/envios/infracciones: el servidor de
         negocio local + un `RpcServer` que expone ese servicio por AMQP.
 
@@ -38,10 +38,16 @@ defmodule Libremarket.Supervisor do
   }
 
   defp children() do
-    case System.get_env("SERVER_TO_RUN") do
-      nil -> children_todo_en_uno()
-      server_to_run -> children_para(String.to_existing_atom("Elixir." <> server_to_run))
-    end
+    repo_children() ++
+      case System.get_env("SERVER_TO_RUN") do
+        nil -> children_todo_en_uno()
+        server_to_run -> children_para(String.to_existing_atom("Elixir." <> server_to_run))
+      end
+  end
+
+  # El Repo arranca primero para que los servidores ya lo encuentren en su init.
+  defp repo_children do
+    if Libremarket.Repo.enabled?(), do: [Libremarket.Repo], else: []
   end
 
   defp children_todo_en_uno() do
@@ -52,16 +58,23 @@ defmodule Libremarket.Supervisor do
       {Libremarket.Pagos.Server, %{}},
       {Libremarket.Envios.Server, %{}},
       {Libremarket.Infracciones.Server, %{}}
-    ] ++ rpc_servers(Map.keys(@handlers))
+    ] ++ rpc_servers(Map.keys(@handlers)) ++ [http_api()]
   end
 
   defp children_para(Libremarket.Compras.Server) do
-    [Libremarket.Amqp.RpcClient, {Libremarket.Compras.Server, %{}}]
+    [Libremarket.Amqp.RpcClient, {Libremarket.Compras.Server, %{}}, http_api()]
   end
 
   defp children_para(modulo) do
     servicio = servicio_de(modulo)
     [{modulo, %{}}] ++ rpc_servers([servicio])
+  end
+
+  # API HTTP de Compras (puerto HTTP_PORT, default 4000). Solo se levanta donde
+  # corre Compras.
+  defp http_api do
+    port = String.to_integer(System.get_env("HTTP_PORT") || "4000")
+    {Bandit, plug: Libremarket.Compras.HttpApi, port: port, ip: :any}
   end
 
   defp rpc_servers(servicios) do
