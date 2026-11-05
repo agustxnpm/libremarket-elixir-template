@@ -5,11 +5,17 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
+    restart: unless-stopped
     environment:
       SERVER_TO_RUN: Libremarket.Compras.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
+      API_TOKEN: ${API_TOKEN:-}
+      HTTP_PORT: ${HTTP_PORT:-4000}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "${HTTP_PORT:-4000}:${HTTP_PORT:-4000}"
     command: iex --sname compras --cookie secret -S mix
     # para habilitar -it
     stdin_open: true
@@ -22,11 +28,13 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
+    restart: unless-stopped
     environment:
       SERVER_TO_RUN: Libremarket.Infracciones.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      DATABASE_URL: ${DATABASE_URL:-}
     command: iex --sname infracciones --cookie secret -S mix
     # para habilitar -it
     stdin_open: true
@@ -39,11 +47,13 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
+    restart: unless-stopped
     environment:
       SERVER_TO_RUN: Libremarket.Envios.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      DATABASE_URL: ${DATABASE_URL:-}
     command: iex --sname envios --cookie secret -S mix
     # para habilitar -it
     stdin_open: true
@@ -56,11 +66,13 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
+    restart: unless-stopped
     environment:
       SERVER_TO_RUN: Libremarket.Ventas.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      DATABASE_URL: ${DATABASE_URL:-}
     command: iex --sname ventas --cookie secret -S mix
     # para habilitar -it
     stdin_open: true
@@ -73,11 +85,13 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
+    restart: unless-stopped
     environment:
       SERVER_TO_RUN: Libremarket.Pagos.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      DATABASE_URL: ${DATABASE_URL:-}
     command: iex --sname pagos --cookie secret -S mix
     # para habilitar -it
     stdin_open: true
