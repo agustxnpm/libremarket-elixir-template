@@ -28,6 +28,9 @@ libremarket-*.tar
 # Docker compose .env file
 .env
 
+# Credenciales de la web PHP (usar web/config.php.example como base)
+/web/config.php
+
 **/mix_home/
 
 **/hex_home/

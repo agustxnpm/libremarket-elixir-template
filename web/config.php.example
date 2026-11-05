@@ -1,0 +1,14 @@
+<?php
+// Copiar como config.php (junto a los demás .php) y completar. config.php no se versiona.
+return [
+    // Cada nodo web consulta SU base local (primario en el Nodo 2, réplica en el Nodo 3).
+    'db_host'  => '127.0.0.1',
+    'db_port'  => 5432,
+    'db_name'  => 'libremarket',
+    'db_user'  => 'webuser',
+    'db_pass'  => 'webpass',
+
+    // API HTTP de Compras (Nodo 1). El token debe coincidir con API_TOKEN del .env del Nodo 1.
+    'api_url'   => 'http://192.168.56.10:4000',
+    'api_token' => 'CAMBIAR_POR_API_TOKEN',
+];

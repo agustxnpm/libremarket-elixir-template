@@ -1,0 +1,10 @@
+# Fragmento de haproxy.cfg (Nodo 1). Integrarlo en tu backend actual hacia N2/N3:
+# lo único nuevo es el healthcheck contra /health.php, para que un nodo web con
+# la base caída salga de la rotación.
+
+backend web_nodes
+    balance roundrobin
+    option httpchk GET /health.php
+    http-check expect status 200
+    server nodo2 192.168.56.11:80 check inter 3s fall 2 rise 2
+    server nodo3 192.168.56.12:80 check inter 3s fall 2 rise 2
