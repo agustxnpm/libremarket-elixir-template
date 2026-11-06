@@ -1,3 +1,6 @@
+# Los servicios se comunican solo por AMQP: los nodos no usan distribucion de
+# Erlang (sin --sname ni --cookie), asi no queda un puerto de distribucion
+# protegido por una cookie fija. Para entrar a la consola: ./libremarket.sh iex <servicio>.
 services:
   compras:
     image: elixir:otp-27-alpine
@@ -13,10 +16,11 @@ services:
       API_TOKEN: ${API_TOKEN:-}
       HTTP_PORT: ${HTTP_PORT:-4000}
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      AMQP_SSL_VERIFY: ${AMQP_SSL_VERIFY:-}
       DATABASE_URL: ${DATABASE_URL:-}
     ports:
       - "${HTTP_PORT:-4000}:${HTTP_PORT:-4000}"
-    command: iex --sname compras --cookie secret -S mix
+    command: iex -S mix
     # para habilitar -it
     stdin_open: true
     tty: true
@@ -34,8 +38,9 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      AMQP_SSL_VERIFY: ${AMQP_SSL_VERIFY:-}
       DATABASE_URL: ${DATABASE_URL:-}
-    command: iex --sname infracciones --cookie secret -S mix
+    command: iex -S mix
     # para habilitar -it
     stdin_open: true
     tty: true
@@ -53,8 +58,9 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      AMQP_SSL_VERIFY: ${AMQP_SSL_VERIFY:-}
       DATABASE_URL: ${DATABASE_URL:-}
-    command: iex --sname envios --cookie secret -S mix
+    command: iex -S mix
     # para habilitar -it
     stdin_open: true
     tty: true
@@ -72,8 +78,9 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      AMQP_SSL_VERIFY: ${AMQP_SSL_VERIFY:-}
       DATABASE_URL: ${DATABASE_URL:-}
-    command: iex --sname ventas --cookie secret -S mix
+    command: iex -S mix
     # para habilitar -it
     stdin_open: true
     tty: true
@@ -91,8 +98,9 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       CLOUDAMQP_URL: ${CLOUDAMQP_URL}
+      AMQP_SSL_VERIFY: ${AMQP_SSL_VERIFY:-}
       DATABASE_URL: ${DATABASE_URL:-}
-    command: iex --sname pagos --cookie secret -S mix
+    command: iex -S mix
     # para habilitar -it
     stdin_open: true
     tty: true

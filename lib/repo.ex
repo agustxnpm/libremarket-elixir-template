@@ -3,11 +3,22 @@ defmodule Libremarket.Repo do
   Wrapper fino sobre `Postgrex` (pool registrado como `Libremarket.Repo`).
   Se conecta a `DATABASE_URL` (siempre el primario) y nunca levanta
   excepciones: toda falla se devuelve como `{:error, :persistencia}`.
+
+  Cada consulta tiene un timeout de 3 s (configurable con
+  `config :libremarket, :db_timeout`), menor que el de las llamadas entre
+  procesos (5 s): si la base esta lenta, la falla vuelve como
+  `{:error, :persistencia}` antes de que se venza el `GenServer.call` que espera.
+
+  SSL: con `?sslmode=require` en la URL la conexion se cifra sin verificar el
+  certificado (sirve con el certificado autofirmado que trae PostgreSQL en
+  Debian); con `?sslmode=verify-full` ademas se verifica contra las CA del
+  sistema y el nombre del host. Sin `sslmode` (o con `disable`) no se usa SSL.
   """
 
   require Logger
 
   @pool_size 5
+  @db_timeout 3_000
 
   @doc "Solo se arranca con adaptador :postgres o si DATABASE_URL esta definida."
   def enabled? do
@@ -34,7 +45,7 @@ defmodule Libremarket.Repo do
 
   @spec query(String.t(), list()) :: {:ok, Postgrex.Result.t()} | {:error, :persistencia}
   def query(sql, params \\ []) do
-    case Postgrex.query(__MODULE__, sql, params) do
+    case Postgrex.query(__MODULE__, sql, params, timeout: db_timeout()) do
       {:ok, %Postgrex.Result{} = result} ->
         {:ok, result}
 
@@ -84,12 +95,36 @@ defmodule Libremarket.Repo do
            URI.parse(url) do
       {usuario, clave} = credenciales(uri.userinfo)
 
-      {:ok,
-       [hostname: host, port: uri.port || 5432, database: base, username: usuario, password: clave]}
+      opts = [
+        hostname: host,
+        port: uri.port || 5432,
+        database: base,
+        username: usuario,
+        password: clave
+      ]
+
+      case ssl(uri.query) do
+        {:ok, nil} -> {:ok, opts}
+        {:ok, ssl} -> {:ok, opts ++ [ssl: ssl]}
+        :error -> {:error, :database_url_invalida}
+      end
     else
       _ -> {:error, :database_url_invalida}
     end
   end
+
+  defp ssl(nil), do: {:ok, nil}
+
+  defp ssl(query) do
+    case URI.decode_query(query) |> Map.get("sslmode") do
+      modo when modo in [nil, "disable"] -> {:ok, nil}
+      "require" -> {:ok, [verify: :verify_none]}
+      "verify-full" -> {:ok, true}
+      _ -> :error
+    end
+  end
+
+  defp db_timeout, do: Application.get_env(:libremarket, :db_timeout, @db_timeout)
 
   defp credenciales(nil), do: {nil, nil}
 

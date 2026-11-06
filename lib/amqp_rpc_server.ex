@@ -18,6 +18,7 @@ defmodule Libremarket.Amqp.RpcServer do
   use GenServer
   use AMQP
 
+  alias Libremarket.Amqp.Codec
   alias Libremarket.VectorClock
 
   def start_link(%{servicio: servicio, handler: handler}) do
@@ -58,8 +59,21 @@ defmodule Libremarket.Amqp.RpcServer do
 
   @impl true
   def handle_info({:basic_deliver, payload, meta}, estado) do
-    %{op: operacion, args: args, clock: reloj_remoto} = :erlang.binary_to_term(payload)
+    case Codec.decode(payload) do
+      {:ok, %{op: operacion, args: args, clock: reloj_remoto}}
+      when is_atom(operacion) and is_list(args) and is_map(reloj_remoto) and is_binary(meta.reply_to) ->
+        atender(estado, operacion, args, reloj_remoto, meta)
 
+      _ ->
+        # Mensaje ilegible o con otra forma: se descarta sin reencolar, para que
+        # no vuelva una y otra vez (y sin tirar este proceso).
+        IO.puts("[#{estado.servicio}] DESCARTA mensaje invalido (#{byte_size(payload)} bytes)")
+        Basic.reject(estado.channel, meta.delivery_tag, requeue: false)
+        {:noreply, estado}
+    end
+  end
+
+  defp atender(estado, operacion, args, reloj_remoto, meta) do
     # Evento de "recepcion": se funde el reloj del pedido con el propio y se avanza.
     clock_recibido =
       estado.clock
@@ -67,12 +81,12 @@ defmodule Libremarket.Amqp.RpcServer do
       |> VectorClock.increment(estado.servicio)
 
     IO.puts("[#{estado.servicio}] RECIBE  #{operacion} #{inspect(args)} reloj remoto=#{VectorClock.format(reloj_remoto)} => #{VectorClock.format(clock_recibido)}")
-    resultado = estado.handler.(operacion, args)
+    resultado = ejecutar(estado, operacion, args)
 
     # Evento de "envio" de la respuesta: se vuelve a avanzar antes de publicar.
     clock_respuesta = VectorClock.increment(clock_recibido, estado.servicio)
 
-    respuesta = :erlang.term_to_binary(%{result: resultado, clock: clock_respuesta})
+    respuesta = Codec.encode(%{result: resultado, clock: clock_respuesta})
 
     IO.puts("[#{estado.servicio}] RESPONDE #{inspect(resultado)} #{VectorClock.format(clock_respuesta)}")
 
@@ -80,5 +94,15 @@ defmodule Libremarket.Amqp.RpcServer do
     Basic.ack(estado.channel, meta.delivery_tag)
 
     {:noreply, %{estado | clock: clock_respuesta}}
+  end
+
+  # Una operacion desconocida o con argumentos que no corresponden no debe tirar
+  # el RpcServer: se responde con un error que Compras trata como respuesta inesperada.
+  defp ejecutar(estado, operacion, args) do
+    estado.handler.(operacion, args)
+  rescue
+    error in [FunctionClauseError, ArgumentError] ->
+      IO.puts("[#{estado.servicio}] ERROR   #{operacion} #{inspect(args)}: #{Exception.message(error)}")
+      {:error, :operacion_invalida}
   end
 end

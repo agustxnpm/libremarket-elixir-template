@@ -37,7 +37,13 @@ sudo grep libremarket_app $(sudo -u postgres psql -tAc "SHOW hba_file;")     # r
 Si falta algo, aplicá [`priv/sql/001_schema.sql`](./priv/sql/001_schema.sql) con roles `libremarket_app` y `webuser` creados, y agregá en `pg_hba.conf`:
 
 ```text
-host    libremarket    libremarket_app    192.168.56.10/32    scram-sha-256
+hostssl libremarket    libremarket_app    192.168.56.10/32    scram-sha-256
+```
+
+Con `hostssl` (en lugar de `host`) PostgreSQL solo acepta a `libremarket_app` si la conexión va cifrada. Verificá que SSL esté activo (en Debian viene encendido con un certificado autofirmado):
+
+```bash
+sudo -u postgres psql -tc "SHOW ssl;"     # debe dar on
 ```
 
 Después: `sudo systemctl reload postgresql`.
@@ -48,10 +54,13 @@ Después: `sudo systemctl reload postgresql`.
 CLOUDAMQP_URL=...
 API_TOKEN=<token aleatorio, por ejemplo openssl rand -hex 24>
 HTTP_PORT=4000
-DATABASE_URL=postgres://libremarket_app:PASSWORD@192.168.56.11:5432/libremarket
+DATABASE_URL=postgres://libremarket_app:PASSWORD@192.168.56.11:5432/libremarket?sslmode=require
 ```
 
 Si la contraseña tiene `@`, `:` o `/`, escribila en formato URL (por ejemplo `@` como `%40`).
+
+- `?sslmode=require` cifra la conexión con la base sin verificar el certificado (sirve con el autofirmado de Debian). `?sslmode=verify-full` además lo verifica, pero necesita un certificado emitido para `192.168.56.11`. Sin `sslmode`, la conexión va sin cifrar.
+- Si `CLOUDAMQP_URL` empieza con `amqps://`, se verifica el certificado del broker. Si la conexión fallara por eso, se puede agregar `AMQP_SSL_VERIFY=false` al `.env` como último recurso (vuelve a dejarla sin verificar).
 
 ---
 
@@ -149,6 +158,7 @@ Notas:
 - La contraseña no se puede leer de PostgreSQL (se guarda hasheada); hay que conocerla. Si no la sabés, reseteala en el Nodo 2 con `\password webuser` (se replica sola al Nodo 3).
 - `api_url` ya apunta a `http://192.168.56.10:4000`.
 - Se conserva el `index.php` del Lab 3 como `index.php.lab3.bak`.
+- El formulario de compra lleva un token anti-CSRF que se compara con una cookie del navegador (`lm_csrf`). No usa la sesión de PHP porque HAProxy reparte cada petición entre N2 y N3. Si al comprar aparece "La solicitud no es válida o expiró", recargá el panel y volvé a intentar.
 
 ## Paso 7 – Verificar los Nodos 2 y 3
 
@@ -208,6 +218,45 @@ sudo -u postgres psql -d libremarket -c \
 ```
 
 Para detener o reiniciar los servicios (por ejemplo tras cambiar el `.env`): `./libremarket.sh stop && ./libremarket.sh start`.
+
+## Paso 10 – Actualizar una instalación existente
+
+Si el sistema ya estaba desplegado y solo cambió el código:
+
+1. Repetí el **Paso 1** (copiar el proyecto; el `.env` del Nodo 1 se conserva si no lo volvés a copiar) y agregá `?sslmode=require` al final de `DATABASE_URL` en `~/libremarket/.env`.
+2. Repetí el **Paso 2** (compilar).
+3. Reiniciá los servicios: `./libremarket.sh stop && ./libremarket.sh start`.
+4. En los Nodos 2 y 3 copiá de nuevo `index.php`, `comprar.php` y `lib.php` a `/var/www/html/` (no hace falta tocar `config.php`).
+
+## Paso 11 – Pruebas de las mejoras de seguridad y robustez
+
+Desde el Nodo 1, con `TOKEN` cargado como en el Paso 5:
+
+```bash
+# La conexión de los servicios a la base va cifrada (en el Nodo 2):
+sudo -u postgres psql -d libremarket -c \
+  "SELECT a.client_addr, s.ssl, s.version FROM pg_stat_ssl s JOIN pg_stat_activity a USING (pid) WHERE a.usename = 'libremarket_app';"
+# Esperado: filas desde 192.168.56.10 con ssl = t.
+
+# CSRF: un POST a la web sin el token del formulario se rechaza.
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.168.56.10/comprar.php \
+  -d 'producto=3&medio_pago=tc&entrega=correo'                  # 403
+
+# La API sigue exigiendo el token:
+curl -s -w ' [%{http_code}]\n' -X POST http://localhost:4000/compras -d 'producto=3&medio_pago=tc&entrega=correo'   # 401
+```
+
+Reinicio con una compra en vuelo (el stock no debe quedar inflado):
+
+```bash
+curl -s -X POST http://localhost:4000/compras -H "X-Api-Token: $TOKEN" -d 'producto=3&medio_pago=tc&entrega=correo'; docker restart compras
+```
+
+En el Nodo 2, la compra queda `interrumpida`. Solo se devuelve el stock si se cortó entre la reserva y el envío (no en `reservando` ni en `enviando_producto`):
+
+```bash
+sudo -u postgres psql -d libremarket -c "SELECT id_compra, paso, estado FROM compras ORDER BY id_compra DESC LIMIT 3;"
+```
 
 ---
 
@@ -272,3 +321,22 @@ Para detener o reiniciar los servicios (por ejemplo tras cambiar el `.env`): `./
 
 **¿Por qué `compra.php` dice "Atendido por nodo-2" si compré desde el nodo-3?**
 Con `balance roundrobin`, HAProxy reparte cada petición HTTP por separado. Una compra genera varias peticiones seguidas (panel, `POST comprar.php`, redirección a `compra.php`) y se alternan entre los nodos. No es un error: `compra.php` consulta la API de Compras, no la base local, por lo que muestra el mismo resultado desde cualquier nodo. Si se quisiera fijar cada navegador a un nodo, se puede agregar `cookie NODO insert indirect nocache` en el backend y `cookie n2` / `cookie n3` en cada `server`, a costa de ocultar el balanceo.
+
+# Mejoras posteriores al despliegue
+
+Después del despliegue se revisó el código en busca de vulnerabilidades y errores. Se corrigió lo siguiente:
+
+| # | Problema | Solución |
+|---|---|---|
+| 1 | La conexión con CloudAMQP no verificaba el certificado (`verify: :verify_none`): alguien en el camino podía hacerse pasar por el broker y leer credenciales y mensajes. | Con `amqps://` se verifica el certificado contra las CA del sistema y el nombre del host ([`config/config.exs`](./config/config.exs)). |
+| 2 | Los mensajes AMQP se decodificaban con `binary_to_term/1` sin `:safe`: un mensaje armado podía crear átomos sin límite o tirar el `RpcServer`, y el mensaje quedaba trabando la cola. | Nuevo [`Libremarket.Amqp.Codec`](./lib/amqp_codec.ex): decodifica con `:safe`, y los mensajes inválidos se descartan sin reencolar. Una operación desconocida responde `{:error, :operacion_invalida}` en vez de tirar el proceso. |
+| 3 | Los contenedores corrían con distribución de Erlang y la cookie fija `secret`. | Se quitaron `--sname` y `--cookie` del `docker-compose.yml`: los servicios solo se comunican por AMQP. |
+| 4 | La conexión de Elixir a PostgreSQL iba sin cifrar. | `DATABASE_URL` acepta `?sslmode=require` o `?sslmode=verify-full`, y `pg_hba.conf` usa `hostssl`. |
+| 5 | El formulario de compra no tenía protección CSRF. | Token anti-CSRF con cookie `SameSite=Strict` ("double submit cookie"), que funciona aunque HAProxy alterne entre nodos. |
+| 6 | Al reiniciar Compras se liberaba el stock de compras interrumpidas en `enviando_producto`, aunque el envío pudo haberse hecho. | Mismo criterio que en los timeouts: no se libera en `reservando` ni en `enviando_producto` (`Compras.liberar_al_recuperar?/1`). |
+| 7 | Si la base fallaba al guardar el paso o el resultado de una compra, el error se ignoraba: la fila quedaba `en_curso`, la web esperaba indefinidamente y un reinicio podía compensar mal. | Si falla el paso, la compra termina con error de persistencia y se libera la reserva. Si falla el resultado final, se reintenta hasta 5 veces. |
+| 8 | Si la base estaba lenta, `comprar/3` vencía a los 5 s y la API respondía 503, pero la compra se creaba igual sin que el usuario se enterara. | Cada consulta tiene un timeout de 3 s y la llamada a `comprar/3`, uno de 10 s: la falla vuelve como error antes de que se venza la llamada. |
+| 9 | Con Postgres, Compras acumulaba en memoria todas las compras finalizadas, sin límite. | Con Postgres el resultado se consulta en la base y ya no se guarda en memoria. |
+| 10 | Si la tabla de productos estaba vacía, Ventas cargaba stock aleatorio, distinto del de `001_schema.sql`. | Ambos cargan 10 unidades por producto. |
+
+Quedan pendientes dos puntos que dependen de la infraestructura: que las reglas de firewall del Nodo 1 persistan tras un reinicio, y retirar `index.php.lab3.bak` de `/var/www/html` (Apache lo sirve como texto plano).

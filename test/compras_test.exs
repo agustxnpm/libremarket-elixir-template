@@ -209,4 +209,26 @@ defmodule Libremarket.ComprasTest do
       end
     end
   end
+
+  describe "fallo_al_registrar/1" do
+    for paso <- [:verificando_infraccion, :calculando_costo, :autorizando_pago, :agendando_envio, :enviando_producto] do
+      test "si no se pudo guardar el paso #{paso}, finaliza con persistencia y libera" do
+        assert {:finalizar, {:error, :persistencia}, [@liberar]} =
+                 Compras.fallo_al_registrar(en_paso(unquote(paso)))
+      end
+    end
+  end
+
+  describe "liberar_al_recuperar?/1" do
+    test "no libera en reservando (no se sabe si se reservo) ni en enviando_producto (pudo enviarse)" do
+      refute Compras.liberar_al_recuperar?("reservando")
+      refute Compras.liberar_al_recuperar?("enviando_producto")
+    end
+
+    for paso <- ~w(verificando_infraccion calculando_costo autorizando_pago agendando_envio) do
+      test "libera en #{paso}" do
+        assert Compras.liberar_al_recuperar?(unquote(paso))
+      end
+    end
+  end
 end

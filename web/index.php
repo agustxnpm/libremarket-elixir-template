@@ -2,6 +2,7 @@
 require __DIR__ . '/lib.php';
 
 $db = db_conectar();
+$csrf = csrf_token();
 
 layout_inicio('Panel');
 ?>
@@ -29,6 +30,7 @@ if ($stock === null || $compras === null || $totales === null || $total === null
 ?>
 <h3>Comprar</h3>
 <form method="POST" action="comprar.php">
+    <input type="hidden" name="csrf" value="<?php echo h($csrf); ?>">
     <label>Producto
         <select name="producto">
             <?php for ($i = 1; $i <= 10; $i++) { echo '<option value="' . $i . '">Producto ' . $i . '</option>'; } ?>

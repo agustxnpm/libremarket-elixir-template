@@ -20,6 +20,7 @@ defmodule Libremarket.Amqp.RpcClient do
   use GenServer
   use AMQP
 
+  alias Libremarket.Amqp.Codec
   alias Libremarket.VectorClock
 
   @yo :compras
@@ -79,7 +80,7 @@ defmodule Libremarket.Amqp.RpcClient do
     # Evento de "envio": el reloj propio avanza antes de publicar el mensaje.
     clock = VectorClock.increment(estado.clock, @yo)
 
-    mensaje = :erlang.term_to_binary(%{op: operacion, args: args, clock: clock})
+    mensaje = Codec.encode(%{op: operacion, args: args, clock: clock})
 
     IO.puts("[compras #{etiqueta(contexto, correlation_id)}] ENVIA   #{servicio}.#{operacion} #{inspect(args, charlists: :as_lists)} #{VectorClock.format(clock)}")
 
@@ -112,8 +113,34 @@ defmodule Libremarket.Amqp.RpcClient do
 
   @impl true
   def handle_info({:basic_deliver, payload, meta}, estado) do
-    %{result: resultado, clock: reloj_remoto} = :erlang.binary_to_term(payload)
+    case Codec.decode(payload) do
+      {:ok, %{result: resultado, clock: reloj_remoto}} when is_map(reloj_remoto) ->
+        recibir(estado, resultado, reloj_remoto, meta)
 
+      _ ->
+        # La cola de respuestas es no_ack: alcanza con ignorarlo.
+        IO.puts("[compras cid=#{inspect(meta.correlation_id)}] DESCARTA respuesta invalida (#{byte_size(payload)} bytes)")
+        {:noreply, estado}
+    end
+  end
+
+  @impl true
+  def handle_info({:rpc_timeout, correlation_id}, estado) do
+    case Map.pop(estado.pendientes, correlation_id) do
+      # La respuesta ya llego (el timeout quedo en la cola de mensajes): no hay nada que hacer.
+      {nil, _pendientes} ->
+        {:noreply, estado}
+
+      {pendiente, pendientes} ->
+        # No hubo evento de recepcion: el reloj no se toca.
+        IO.puts("[compras #{etiqueta(pendiente.contexto, correlation_id)}] TIMEOUT #{pendiente.servicio}.#{pendiente.operacion} sin respuesta tras #{timeout()} ms")
+
+        GenServer.cast(pendiente.responder_a, {:rpc_timeout, pendiente.contexto})
+        {:noreply, %{estado | pendientes: pendientes}}
+    end
+  end
+
+  defp recibir(estado, resultado, reloj_remoto, meta) do
     case Map.pop(estado.pendientes, meta.correlation_id) do
       {nil, _pendientes} ->
         # Respuesta que llego tarde (ya vencio el timeout) o que no es nuestra: se descarta.
@@ -133,22 +160,6 @@ defmodule Libremarket.Amqp.RpcClient do
 
         GenServer.cast(pendiente.responder_a, {:rpc_reply, pendiente.contexto, resultado})
         {:noreply, %{estado | clock: clock, pendientes: pendientes}}
-    end
-  end
-
-  @impl true
-  def handle_info({:rpc_timeout, correlation_id}, estado) do
-    case Map.pop(estado.pendientes, correlation_id) do
-      # La respuesta ya llego (el timeout quedo en la cola de mensajes): no hay nada que hacer.
-      {nil, _pendientes} ->
-        {:noreply, estado}
-
-      {pendiente, pendientes} ->
-        # No hubo evento de recepcion: el reloj no se toca.
-        IO.puts("[compras #{etiqueta(pendiente.contexto, correlation_id)}] TIMEOUT #{pendiente.servicio}.#{pendiente.operacion} sin respuesta tras #{timeout()} ms")
-
-        GenServer.cast(pendiente.responder_a, {:rpc_timeout, pendiente.contexto})
-        {:noreply, %{estado | pendientes: pendientes}}
     end
   end
 

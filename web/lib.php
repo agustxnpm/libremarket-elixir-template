@@ -37,6 +37,31 @@ set_exception_handler(function (Throwable $e) {
     layout_fin(null);
 });
 
+// Protección CSRF con "double submit cookie": el formulario lleva el mismo valor
+// aleatorio que una cookie SameSite=Strict, y comprar.php exige que coincidan.
+// No usa la sesión de PHP porque HAProxy reparte cada petición entre N2 y N3, y
+// la sesión de un nodo no existe en el otro; la cookie viaja con el navegador.
+const CSRF_COOKIE = 'lm_csrf';
+
+// Debe llamarse antes de imprimir cualquier salida (envía una cookie).
+function csrf_token(): string
+{
+    $token = $_COOKIE[CSRF_COOKIE] ?? '';
+    if (!is_string($token) || !preg_match('/^[0-9a-f]{64}$/', $token)) {
+        $token = bin2hex(random_bytes(32));
+        setcookie(CSRF_COOKIE, $token, ['path' => '/', 'httponly' => true, 'samesite' => 'Strict']);
+        $_COOKIE[CSRF_COOKIE] = $token;
+    }
+    return $token;
+}
+
+function csrf_valido(): bool
+{
+    $cookie = $_COOKIE[CSRF_COOKIE] ?? '';
+    $form   = $_POST['csrf'] ?? '';
+    return is_string($cookie) && is_string($form) && $cookie !== '' && hash_equals($cookie, $form);
+}
+
 function h($valor): string
 {
     return htmlspecialchars((string) $valor, ENT_QUOTES, 'UTF-8');

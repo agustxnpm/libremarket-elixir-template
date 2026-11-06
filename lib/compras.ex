@@ -129,6 +129,23 @@ defmodule Libremarket.Compras do
   def timeout(estado), do: {:finalizar, {:error, :timeout}, [liberar(estado)]}
 
   @doc """
+  Finaliza la compra porque no se pudo guardar en la base el paso al que acaba
+  de avanzar. El pedido de ese paso todavia no se envio, y como cualquier paso
+  posterior a `:reservando` implica que la reserva ya se hizo, siempre se libera.
+  """
+  @spec fallo_al_registrar(estado()) :: {:finalizar, resultado_final(), [accion()]}
+  def fallo_al_registrar(estado), do: {:finalizar, {:error, :persistencia}, [liberar(estado)]}
+
+  @doc """
+  Indica si, al reiniciar Compras, hay que liberar el stock de una compra que
+  quedo interrumpida en `paso` (tal como esta guardado en la base). Mismo
+  criterio que `timeout/1`: en `reservando` no se sabe si Ventas llego a
+  reservar, y en `enviando_producto` el envio pudo haberse hecho.
+  """
+  @spec liberar_al_recuperar?(String.t()) :: boolean()
+  def liberar_al_recuperar?(paso), do: paso not in ["reservando", "enviando_producto"]
+
+  @doc """
   Texto corto del resultado final, tal como se guarda en `compras.resultado`.
   """
   @spec resultado_a_texto(resultado_final()) :: String.t()
@@ -251,6 +268,15 @@ defmodule Libremarket.Compras.Server do
   alias Libremarket.Amqp.RpcClient
   alias Libremarket.Compras
 
+  # Mayor que el timeout de cada consulta a la base (3 s): si la base esta
+  # lenta, `comprar/3` recibe `{:error, :persistencia}` en vez de vencerse
+  # mientras el servidor igual termina creando la compra.
+  @timeout_comprar 10_000
+
+  # Reintentos para guardar el resultado final si la base falla en ese momento.
+  @reintentos_final 5
+  @espera_reintento 2_000
+
   # API del cliente
 
   @doc """
@@ -273,7 +299,8 @@ defmodule Libremarket.Compras.Server do
       ) do
     GenServer.call(
       pid,
-      {:comprar, id_producto, medio_de_pago, forma_de_entrega}
+      {:comprar, id_producto, medio_de_pago, forma_de_entrega},
+      @timeout_comprar
     )
   end
 
@@ -331,7 +358,7 @@ defmodule Libremarket.Compras.Server do
 
   # Las compras que quedaron `en_curso` pertenecen a un proceso que murio (el pid
   # del solicitante no se persiste): se marcan `interrumpida` y, si ya habian
-  # superado la reserva, se libera el stock.
+  # superado la reserva y no llegaron al envio, se libera el stock.
   @impl true
   def handle_continue(:recuperar, estado) do
     case estado.adapter.interrumpir_en_curso(estado.datos) do
@@ -339,7 +366,7 @@ defmodule Libremarket.Compras.Server do
         for %{id: id, producto: producto, paso: paso} <- interrumpidas do
           IO.puts("[compras ##{id}] INTERRUMPIDA al reiniciar (paso=#{paso})")
 
-          if paso != "reservando" do
+          if Compras.liberar_al_recuperar?(paso) do
             RpcClient.request(:ventas, :liberar_producto, [producto], {id, :liberando})
           end
         end
@@ -416,6 +443,12 @@ defmodule Libremarket.Compras.Server do
     procesar(estado, id_compra, paso, &Compras.timeout/1)
   end
 
+  @impl true
+  def handle_info({:reintentar_final, id_compra, paso, resultado, intento}, estado) do
+    guardar_final(estado, id_compra, paso, resultado, intento)
+    {:noreply, estado}
+  end
+
   # Aplica `transicion` a la compra solo si sigue esperando ese `paso`; una
   # respuesta tardia o repetida (compra ya avanzada o terminada) se ignora.
   defp procesar(estado, id_compra, paso, transicion) do
@@ -423,14 +456,20 @@ defmodule Libremarket.Compras.Server do
       %{^id_compra => %{paso: ^paso} = compra} ->
         case transicion.(compra) do
           {:continuar, compra, acciones} ->
-            estado.adapter.registrar_paso(estado.datos, id_compra, compra.paso)
-            ejecutar_acciones(id_compra, acciones)
-            {:noreply, put_in(estado, [:en_curso, id_compra], compra)}
+            case estado.adapter.registrar_paso(estado.datos, id_compra, compra.paso) do
+              :ok ->
+                ejecutar_acciones(id_compra, acciones)
+                {:noreply, put_in(estado, [:en_curso, id_compra], compra)}
+
+              # Si se siguiera sin guardar el paso, un reinicio veria un paso
+              # viejo y compensaria mal: se corta la compra aca.
+              {:error, _} ->
+                {:finalizar, resultado, acciones} = Compras.fallo_al_registrar(compra)
+                terminar(estado, compra, resultado, acciones)
+            end
 
           {:finalizar, resultado, acciones} ->
-            estado.adapter.registrar_final(estado.datos, id_compra, compra.paso, resultado)
-            ejecutar_acciones(id_compra, acciones)
-            {:noreply, finalizar(estado, compra, resultado)}
+            terminar(estado, compra, resultado, acciones)
         end
 
       _ ->
@@ -442,15 +481,41 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
+  defp terminar(estado, compra, resultado, acciones) do
+    guardar_final(estado, compra.id, compra.paso, resultado, 1)
+    ejecutar_acciones(compra.id, acciones)
+    {:noreply, finalizar(estado, compra, resultado)}
+  end
+
+  # Si la base falla al guardar el resultado, la fila quedaria `en_curso` para
+  # siempre (la web seguiria esperando): se reintenta unas veces.
+  defp guardar_final(estado, id_compra, paso, resultado, intento) do
+    case estado.adapter.registrar_final(estado.datos, id_compra, paso, resultado) do
+      :ok ->
+        :ok
+
+      {:error, _} when intento < @reintentos_final ->
+        IO.puts("[compras ##{id_compra}] REINTENTA guardar el resultado (intento #{intento})")
+        espera = Application.get_env(:libremarket, :espera_reintento_final, @espera_reintento)
+        Process.send_after(self(), {:reintentar_final, id_compra, paso, resultado, intento + 1}, espera)
+
+      {:error, _} ->
+        IO.puts("[compras ##{id_compra}] NO SE GUARDO el resultado tras #{intento} intentos")
+    end
+  end
+
+  # Con Postgres el resultado se consulta en la base, asi que no se acumula en
+  # memoria (el mapa creceria sin limite); en memoria es la unica copia.
   defp finalizar(estado, compra, resultado) do
     IO.puts("[compras ##{compra.id}] FINALIZA #{inspect(resultado)}")
     send(compra.solicitante, {:compra_finalizada, compra.id, resultado})
 
-    %{
-      estado
-      | en_curso: Map.delete(estado.en_curso, compra.id),
-        finalizadas: Map.put(estado.finalizadas, compra.id, resultado)
-    }
+    finalizadas =
+      if estado.adapter == Libremarket.Compras.Memoria,
+        do: Map.put(estado.finalizadas, compra.id, resultado),
+        else: estado.finalizadas
+
+    %{estado | en_curso: Map.delete(estado.en_curso, compra.id), finalizadas: finalizadas}
   end
 
   defp ejecutar_acciones(id_compra, acciones) do

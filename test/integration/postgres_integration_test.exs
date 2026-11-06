@@ -143,13 +143,16 @@ defmodule Libremarket.PostgresIntegrationTest do
 
       reservada = insertar.(5, "autorizando_pago")
       sin_reserva = insertar.(6, "reservando")
+      en_envio = insertar.(7, "enviando_producto")
 
       start_supervised!({Compras.Server, %{}})
 
       assert {[5], {^reservada, :liberando}} = pedido(:ventas, :liberar_producto)
       refute_receive {:"$gen_cast", {:rpc, :ventas, :liberar_producto, [6], _, _}}, 100
+      # En :enviando_producto el envio pudo haberse hecho: no se devuelve el stock.
+      refute_receive {:"$gen_cast", {:rpc, :ventas, :liberar_producto, [7], _, _}}, 100
 
-      for id <- [reservada, sin_reserva] do
+      for id <- [reservada, sin_reserva, en_envio] do
         assert {:ok, %{estado: "interrumpida"}} = Compras.Server.consultar(id)
       end
 

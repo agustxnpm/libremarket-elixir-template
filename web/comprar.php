@@ -23,6 +23,10 @@ function fallo(string $mensaje, int $status = 200): void
     exit;
 }
 
+if (!csrf_valido()) {
+    fallo('La solicitud no es válida o expiró. Vuelva al panel e intente nuevamente.', 403);
+}
+
 if ($producto === false || $producto === null || !in_array($medioPago, MEDIOS_DE_PAGO, true) || !in_array($entrega, ENTREGAS, true)) {
     fallo('Datos de compra inválidos. Revise el producto, el medio de pago y la entrega.', 400);
 }

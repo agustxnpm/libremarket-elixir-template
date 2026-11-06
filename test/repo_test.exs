@@ -21,6 +21,20 @@ defmodule Libremarket.RepoTest do
     Supervisor.stop(pid)
   end
 
+  test "sslmode=require y verify-full arrancan el pool; un sslmode desconocido no" do
+    {:ok, _} = Application.ensure_all_started(:postgrex)
+    on_exit(fn -> System.delete_env("DATABASE_URL") end)
+
+    for modo <- ["require", "verify-full", "disable"] do
+      System.put_env("DATABASE_URL", "postgres://u:p@127.0.0.1:1/libremarket?sslmode=#{modo}")
+      assert {:ok, pid} = Libremarket.Repo.start_link()
+      Supervisor.stop(pid)
+    end
+
+    System.put_env("DATABASE_URL", "postgres://u:p@127.0.0.1:1/libremarket?sslmode=cualquiera")
+    assert {:error, :database_url_invalida} = Libremarket.Repo.start_link()
+  end
+
   test "DATABASE_URL invalida no arranca el Repo" do
     System.put_env("DATABASE_URL", "no-es-una-url")
     on_exit(fn -> System.delete_env("DATABASE_URL") end)

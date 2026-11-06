@@ -52,16 +52,18 @@ defmodule Libremarket.Ventas.Postgres do
   require Logger
 
   alias Libremarket.Repo
-  alias Libremarket.Ventas
+
+  # Misma semilla que priv/sql/001_schema.sql (productos 1..10 con 10 unidades).
+  @stock_semilla 10
 
   # Semilla solo si la tabla esta vacia, asi el stock sobrevive a reinicios.
   def init(_opts) do
     case Repo.query("SELECT COUNT(*) FROM productos") do
       {:ok, %{rows: [[0]]}} ->
-        for {id, stock} <- Ventas.stock_inicial() do
+        for id <- 1..10 do
           Repo.query(
             "INSERT INTO productos (id_producto, stock) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            [id, stock]
+            [id, @stock_semilla]
           )
         end
 
